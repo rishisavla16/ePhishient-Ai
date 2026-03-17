@@ -1,9 +1,7 @@
 from flask import Flask, request, jsonify, render_template
 import joblib
-import pandas as pd
 import os
-import csv
-import requests
+from urllib.parse import urlparse
 from train_model import PhishingDetector
 
 app = Flask(__name__)
@@ -14,8 +12,34 @@ try:
     model = joblib.load('phishing_model.pkl')
     detector.model = model
     print("Model loaded successfully.")
-except:
+except Exception:
     print("Model not found. It will be trained on the first request.")
+
+
+def normalize_input_url(url):
+    url = (url or '').strip()
+    if not url:
+        return ''
+
+    if not url.startswith(('http://', 'https://')):
+        url = 'http://' + url
+
+    return PhishingDetector.normalize_url(url)
+
+
+def is_valid_url(url):
+    parsed = urlparse(url)
+    hostname = (parsed.netloc or '').strip()
+    return bool(parsed.scheme in {'http', 'https'} and hostname and ('.' in hostname or hostname.isdigit()))
+
+
+def ensure_model_ready():
+    try:
+        _ = detector.model.n_features_in_
+    except Exception:
+        print("Model missing or not fitted. Training model...")
+        detector.train()
+        detector.model = joblib.load('phishing_model.pkl')
 
 @app.route('/')
 def home():
@@ -23,23 +47,15 @@ def home():
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    url = request.form.get('url')
+    raw_url = request.form.get('url')
+    url = normalize_input_url(raw_url)
     if not url:
         return jsonify({'error': 'No URL provided'})
 
-    # Normalize URL (ensure scheme exists) for consistent feature extraction
-    if not url.startswith(('http://', 'https://')):
-        url = 'http://' + url
+    if not is_valid_url(url):
+        return jsonify({'error': 'Invalid URL format.'})
 
-    # Validate if URL is reachable
-    try:
-        # Ensure scheme exists for the request
-        target_url = url
-        if not target_url.startswith(('http://', 'https://')):
-            target_url = 'http://' + target_url
-        requests.get(target_url, timeout=5, headers={'User-Agent': 'PhishingDetector/1.0'})
-    except requests.RequestException:
-        return jsonify({'error': 'URL is unreachable or invalid.'})
+    ensure_model_ready()
 
     # 1. Extract Features
     features = detector.extract_features(url)
@@ -47,13 +63,15 @@ def predict():
     # 2. Predict
     try:
         prediction = detector.model.predict([features])[0]
-        prob = detector.model.predict_proba([features])[0][1] # Probability of being malicious
+        prob = detector.model.predict_proba([features])[0][1] # Malicious risk score
     except (ValueError, AttributeError):
         # Handle feature mismatch or model not fitted
         print("Model mismatch or not trained. Retraining now...")
         detector.train()
         prediction = detector.model.predict([features])[0]
         prob = detector.model.predict_proba([features])[0][1]
+
+    confidence = prob if prediction == 1 else (1 - prob)
     
     # 3. Explain
     explanation = detector.explain_prediction(features, prediction, url)
@@ -61,7 +79,8 @@ def predict():
     result = {
         'url': url,
         'is_malicious': bool(prediction),
-        'confidence': float(prob),
+        'risk_score': float(prob),
+        'confidence': float(confidence),
         'explanation': explanation
     }
     return jsonify(result)

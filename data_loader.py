@@ -8,6 +8,18 @@ class DataLoader:
     def __init__(self):
         self.data = []
 
+    @staticmethod
+    def _clean_url_frame(df):
+        if df.empty:
+            return df
+
+        df = df[['url', 'label']].dropna()
+        df['url'] = df['url'].astype(str).str.strip()
+        df = df[df['url'] != '']
+        df['label'] = pd.to_numeric(df['label'], errors='coerce').fillna(0).astype(int)
+        df = df[df['label'].isin([0, 1])]
+        return df.drop_duplicates(subset=['url'])
+
     def fetch_phishtank(self):
         print("Fetching PhishTank data...")
         try:
@@ -28,7 +40,7 @@ class DataLoader:
         print("Fetching OpenPhish data...")
         try:
             url = "https://openphish.com/feed.txt"
-            response = requests.get(url)
+            response = requests.get(url, timeout=10, headers={'User-Agent': 'PhishingDetector/1.0'})
             if response.status_code == 200:
                 urls = response.text.strip().split('\n')
                 df = pd.DataFrame(urls, columns=['url'])
@@ -41,7 +53,7 @@ class DataLoader:
         print("Fetching URLhaus data...")
         try:
             url = "https://urlhaus.abuse.ch/downloads/csv_recent/"
-            response = requests.get(url)
+            response = requests.get(url, timeout=10, headers={'User-Agent': 'PhishingDetector/1.0'})
             if response.status_code == 200:
                 # Skip comments starting with #
                 df = pd.read_csv(io.StringIO(response.text), comment='#', header=None)
@@ -79,7 +91,7 @@ class DataLoader:
             else:
                 # Download the top 1 million domains list (approx 6MB)
                 url = "https://tranco-list.eu/top-1m.csv.zip"
-                response = requests.get(url, stream=True, timeout=15)
+                response = requests.get(url, stream=True, timeout=15, headers={'User-Agent': 'PhishingDetector/1.0'})
                 
                 if response.status_code == 200:
                     z_obj = zipfile.ZipFile(io.BytesIO(response.content))
@@ -105,7 +117,7 @@ class DataLoader:
             print(f"Tranco fetch error: {e}")
             # Fallback to a small list if download fails
             top_domains = ["google.com", "apple.com", "microsoft.com", "amazon.com", "facebook.com"]
-            urls = [f"https://{d}" for d in top_domains]
+            urls = [f"https://{d}" for d in top_domains] + [f"http://{d}" for d in top_domains]
             self.data.append(pd.DataFrame(urls, columns=['url']).assign(label=0))
 
     def get_data(self):
@@ -117,7 +129,11 @@ class DataLoader:
         
         # Combine scraped data if available
         if self.data:
-            df_full = pd.concat(self.data, ignore_index=True)
+            cleaned_frames = [self._clean_url_frame(df_item) for df_item in self.data if not df_item.empty]
+            if cleaned_frames:
+                df_full = pd.concat(cleaned_frames, ignore_index=True)
+            else:
+                df_full = pd.DataFrame(columns=['url', 'label'])
             
             # Balance classes to prevent bias
             malicious = df_full[df_full['label'] == 1]
@@ -144,6 +160,12 @@ class DataLoader:
         if os.path.exists('feedback_data.csv'):
             print("Loading feedback data...")
             df_feedback = pd.read_csv('feedback_data.csv')
+            df_feedback = self._clean_url_frame(df_feedback)
             df = pd.concat([df, df_feedback], ignore_index=True)
+
+        # Last-pass cleanup and dedupe to avoid contradictory duplicates.
+        df = self._clean_url_frame(df)
+        if not df.empty:
+            df = df.groupby('url', as_index=False)['label'].max()
             
         return df

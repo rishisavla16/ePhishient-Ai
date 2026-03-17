@@ -86,7 +86,8 @@ Machine Learning Model
 * Algorithm: Random Forest Classifier
 * Library: sklearn.ensemble.RandomForestClassifier
 * Training: Performed on the extracted lexical feature set
-* Accuracy: 99.88%
+* Evaluation: Domain-grouped holdout split to reduce train/test leakage
+* Metrics: Accuracy, Precision, Recall, F1, ROC-AUC printed at training time
 * Persistence: The trained model is serialized as phishing_model.pkl for fast inference
 
 
@@ -100,7 +101,7 @@ Framework
 Endpoints
 
 * / : Renders the main user interface
-* /predict : Accepts a URL, extracts features, and returns a classification with confidence score
+* /predict : Accepts a URL, extracts features, and returns classification, risk score, and confidence
 * /retrain : Executes the data collection and training pipeline in the background
 
 
@@ -136,4 +137,4 @@ Usage Guide
 Security Considerations
 
 This application analyzes only the textual structure of URLs.
-While it may check basic reachability, it does not fetch page content, execute scripts, or render external resources, making it safe for evaluating potentially malicious links.
+It does not fetch page content, execute scripts, or render external resources, making it safe for evaluating potentially malicious links.

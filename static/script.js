@@ -21,7 +21,12 @@ document.getElementById('clearBtn').addEventListener('click', function() {
 });
 
 async function checkUrl() {
-    const url = document.getElementById('urlInput').value;
+    const url = document.getElementById('urlInput').value.trim();
+    if (!url) {
+        showModal("Please enter a URL before analyzing.");
+        return;
+    }
+
     currentUrl = url;
     document.getElementById('urlInput').blur(); // Dismiss keyboard on mobile
     const formData = new FormData();
@@ -67,7 +72,7 @@ async function checkUrl() {
     document.getElementById('confidenceScore').innerText = (data.confidence * 100).toFixed(2) + "%";
     
     // Update Gradient Marker Position
-    const percentage = data.confidence * 100;
+    const percentage = (data.risk_score ?? data.confidence) * 100;
     const marker = document.getElementById('riskMarker');
     
     // Update tooltip text

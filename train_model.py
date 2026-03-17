@@ -5,20 +5,65 @@ import joblib
 import math
 from urllib.parse import urlparse
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.model_selection import GroupShuffleSplit
+from sklearn.metrics import accuracy_score, classification_report, precision_score, recall_score, f1_score, roc_auc_score
 from data_loader import DataLoader
 
 class PhishingDetector:
     def __init__(self):
-        self.model = RandomForestClassifier(n_estimators=100, random_state=42)
+        self.model = RandomForestClassifier(
+            n_estimators=300,
+            random_state=42,
+            class_weight='balanced_subsample',
+            min_samples_leaf=2,
+            n_jobs=-1
+        )
         self.feature_names = [
             'url_length', 'hostname_length', 'path_length', 'fd_length', 'tld_length',
             'count_dash', 'count_at', 'count_question', 'count_percent', 'count_dot',
             'count_equal', 'count_ampersand', 'count_underscore',
             'count_digits', 'count_alpha',
-            'is_ip', 'short_url', 'https_token', 'sensitive_words', 'entropy'
+            'is_ip', 'short_url', 'https_token', 'sensitive_words', 'entropy',
+            'subdomain_count', 'has_port', 'digit_ratio', 'special_char_ratio',
+            'suspicious_tld', 'double_slash_path', 'query_param_count', 'hex_char_count'
         ]
+
+    @staticmethod
+    def normalize_url(url):
+        """Normalize URL text for consistent feature extraction and deduplication."""
+        if pd.isna(url):
+            return ""
+
+        url = str(url).strip()
+        if not url:
+            return ""
+
+        if not url.startswith(('http://', 'https://')):
+            url = 'http://' + url
+
+        parsed = urlparse(url)
+        hostname = parsed.netloc.lower().strip()
+
+        # Drop leading www for more stable domain grouping.
+        if hostname.startswith('www.'):
+            hostname = hostname[4:]
+
+        path = parsed.path or '/'
+        query = f"?{parsed.query}" if parsed.query else ''
+        fragment = f"#{parsed.fragment}" if parsed.fragment else ''
+        return f"{parsed.scheme.lower()}://{hostname}{path}{query}{fragment}"
+
+    @staticmethod
+    def _domain_group(hostname):
+        """Create a stable domain group key to reduce train/test leakage across same hosts."""
+        host = (hostname or '').split(':')[0].lower()
+        if host.startswith('www.'):
+            host = host[4:]
+
+        parts = host.split('.')
+        if len(parts) >= 2:
+            return '.'.join(parts[-2:])
+        return host
 
     def get_entropy(self, text):
         if not text:
@@ -37,6 +82,7 @@ class PhishingDetector:
         parsed = urlparse(url)
         hostname = parsed.netloc
         path = parsed.path
+        query = parsed.query
         
         # Feature extraction logic
         features = {}
@@ -75,6 +121,23 @@ class PhishingDetector:
         
         # Entropy
         features['entropy'] = self.get_entropy(url)
+
+        # Additional robust lexical signals
+        host_no_port = hostname.split(':')[0]
+        host_parts = host_no_port.split('.') if host_no_port else []
+        features['subdomain_count'] = max(len(host_parts) - 2, 0)
+        features['has_port'] = 1 if parsed.port else 0
+
+        url_length = max(len(url), 1)
+        special_chars = sum(not c.isalnum() for c in url)
+        features['digit_ratio'] = features['count_digits'] / url_length
+        features['special_char_ratio'] = special_chars / url_length
+
+        suspicious_tlds = {'xyz', 'top', 'click', 'gq', 'cf', 'tk', 'work', 'support', 'zip', 'review'}
+        features['suspicious_tld'] = 1 if tld.lower() in suspicious_tlds else 0
+        features['double_slash_path'] = 1 if '//' in path else 0
+        features['query_param_count'] = query.count('&') + (1 if query else 0)
+        features['hex_char_count'] = len(re.findall(r'%[0-9a-fA-F]{2}', url))
         
         # Return list in specific order
         return [features[key] for key in self.feature_names]
@@ -112,19 +175,51 @@ class PhishingDetector:
     def train(self):
         loader = DataLoader()
         df = loader.get_data()
+
+        if df.empty:
+            raise ValueError("Training dataset is empty. Could not train model.")
+
+        # Basic cleanup and canonicalization before feature extraction.
+        df = df[['url', 'label']].dropna()
+        df['url'] = df['url'].astype(str).str.strip()
+        df = df[df['url'] != '']
+        df['normalized_url'] = df['url'].apply(self.normalize_url)
+        df = df[df['normalized_url'] != '']
+
+        # If duplicate URLs have conflicting labels, keep malicious label as safer default.
+        df = df.groupby('normalized_url', as_index=False)['label'].max()
+        df = df.rename(columns={'normalized_url': 'url'})
+
+        if df['label'].nunique() < 2:
+            raise ValueError("Training requires both benign and malicious samples.")
         
         print("Extracting features...")
         X = np.array([self.extract_features(url) for url in df['url']])
         y = df['label'].values
-        
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+        # Group by registered-like domain to reduce optimistic leakage in evaluation.
+        groups = [self._domain_group(urlparse(u).netloc) for u in df['url']]
+        splitter = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+        train_idx, test_idx = next(splitter.split(X, y, groups=groups))
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
         
         print("Training Random Forest...")
         self.model.fit(X_train, y_train)
         
         preds = self.model.predict(X_test)
+        probs = self.model.predict_proba(X_test)[:, 1]
         accuracy = accuracy_score(y_test, preds)
+        precision = precision_score(y_test, preds, zero_division=0)
+        recall = recall_score(y_test, preds, zero_division=0)
+        f1 = f1_score(y_test, preds, zero_division=0)
+        auc = roc_auc_score(y_test, probs)
+
         print(f"Model Accuracy: {accuracy}")
+        print(f"Precision: {precision}")
+        print(f"Recall: {recall}")
+        print(f"F1 Score: {f1}")
+        print(f"ROC-AUC: {auc}")
         print(classification_report(y_test, preds))
         
         # Save model
