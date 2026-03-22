@@ -6,9 +6,16 @@ from train_model import PhishingDetector
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, 'phishing_model.pkl')
+TEMPLATE_DIR = os.path.join(BASE_DIR, 'templates')
+STATIC_DIR = os.path.join(BASE_DIR, 'static')
 IS_VERCEL = os.environ.get('VERCEL') == '1'
 
-app = Flask(__name__, template_folder='templates', static_folder='static')
+app = Flask(
+    __name__,
+    template_folder=TEMPLATE_DIR,
+    static_folder=STATIC_DIR,
+    static_url_path='/static'
+)
 
 # Load Model
 detector = PhishingDetector()
