@@ -4,16 +4,20 @@ import os
 from urllib.parse import urlparse
 from train_model import PhishingDetector
 
-app = Flask(__name__)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, 'phishing_model.pkl')
+IS_VERCEL = os.environ.get('VERCEL') == '1'
+
+app = Flask(__name__, template_folder='templates', static_folder='static')
 
 # Load Model
 detector = PhishingDetector()
 try:
-    model = joblib.load('phishing_model.pkl')
+    model = joblib.load(MODEL_PATH)
     detector.model = model
     print("Model loaded successfully.")
 except Exception:
-    print("Model not found. It will be trained on the first request.")
+    print("Model not found. It will be trained on first request outside serverless.")
 
 
 def normalize_input_url(url):
@@ -37,9 +41,11 @@ def ensure_model_ready():
     try:
         _ = detector.model.n_features_in_
     except Exception:
+        if IS_VERCEL:
+            raise RuntimeError("Model is unavailable in serverless runtime. Commit phishing_model.pkl and redeploy.")
         print("Model missing or not fitted. Training model...")
         detector.train()
-        detector.model = joblib.load('phishing_model.pkl')
+        detector.model = joblib.load(MODEL_PATH)
 
 @app.route('/')
 def home():
@@ -55,7 +61,10 @@ def predict():
     if not is_valid_url(url):
         return jsonify({'error': 'Invalid URL format.'})
 
-    ensure_model_ready()
+    try:
+        ensure_model_ready()
+    except RuntimeError as exc:
+        return jsonify({'error': str(exc)}), 503
 
     # 1. Extract Features
     features = detector.extract_features(url)
@@ -90,9 +99,15 @@ def retrain_model():
     """
     Manually trigger model retraining.
     """
+    if IS_VERCEL:
+        return jsonify({
+            'status': 'error',
+            'message': 'Retraining is disabled on Vercel serverless runtime. Train locally and redeploy the model file.'
+        }), 400
+
     accuracy = detector.train()
     # Reload the model into memory
-    detector.model = joblib.load('phishing_model.pkl')
+    detector.model = joblib.load(MODEL_PATH)
     return jsonify({'status': 'success', 'message': f'Model retrained with new data! Accuracy: {accuracy:.2%}'})
 
 if __name__ == "__main__":
