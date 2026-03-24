@@ -163,8 +163,12 @@ class PhishingDetector:
                 reasons.append("High randomness (entropy) in URL structure (Indicator #37).")
             if feats.get('count_dash', 0) > 3:
                 reasons.append("Excessive hyphens in domain (Indicator #13).")
-            if feats.get('url_length', 0) > 75:
-                reasons.append("URL is suspiciously long (Indicator #36).")
+            if feats.get('suspicious_tld', 0) == 1:
+                reasons.append("Uses a commonly abused top-level domain.")
+            if feats.get('hex_char_count', 0) > 3:
+                reasons.append("Contains heavy URL encoding that may hide intent.")
+            if feats.get('query_param_count', 0) > 4:
+                reasons.append("Contains many query parameters often used for redirection or tracking abuse.")
             if not reasons:
                 reasons.append("Detected suspicious patterns matching known phishing sites.")
         else:

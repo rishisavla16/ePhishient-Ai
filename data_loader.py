@@ -9,6 +9,35 @@ class DataLoader:
         self.data = []
 
     @staticmethod
+    def _build_benign_urls(domains):
+        """Create realistic benign URL variants so long paths are not over-penalized."""
+        common_paths = [
+            '/',
+            '/about',
+            '/contact',
+            '/support',
+            '/docs/getting-started',
+            '/products/features'
+        ]
+        common_queries = ['', '?ref=homepage', '?utm_source=web']
+
+        urls = []
+        for domain in domains:
+            for scheme in ('https', 'http'):
+                base = f"{scheme}://{domain}"
+                for path in common_paths:
+                    if path == '/':
+                        urls.append(base)
+                    else:
+                        urls.append(base + path)
+
+                # Include a few realistic query-string variants.
+                urls.append(base + '/search' + common_queries[1])
+                urls.append(base + '/help/article' + common_queries[2])
+
+        return urls
+
+    @staticmethod
     def _clean_url_frame(df):
         if df.empty:
             return df
@@ -72,11 +101,8 @@ class DataLoader:
             if os.path.exists('top-1m.csv'):
                 print("Using local top-1m.csv")
                 df = pd.read_csv('top-1m.csv', header=None, names=['rank', 'domain'], nrows=3000)
-                
-                urls = []
-                for domain in df['domain']:
-                    urls.append(f"https://{domain}")
-                    urls.append(f"http://{domain}")
+
+                urls = self._build_benign_urls(df['domain'])
                 
                 df_final = pd.DataFrame(urls, columns=['url'])
                 df_final['label'] = 0
@@ -102,12 +128,9 @@ class DataLoader:
                 with z.open('top-1m.csv') as f:
                     # Read top 3000 domains to balance the dataset
                     df = pd.read_csv(f, header=None, names=['rank', 'domain'], nrows=3000)
-                    
-                    # Create URL variations (http/https) to make the model robust
-                    urls = []
-                    for domain in df['domain']:
-                        urls.append(f"https://{domain}")
-                        urls.append(f"http://{domain}")
+
+                    # Create realistic benign URL variations to make the model robust
+                    urls = self._build_benign_urls(df['domain'])
                     
                     df_final = pd.DataFrame(urls, columns=['url'])
                     df_final['label'] = 0
@@ -117,7 +140,7 @@ class DataLoader:
             print(f"Tranco fetch error: {e}")
             # Fallback to a small list if download fails
             top_domains = ["google.com", "apple.com", "microsoft.com", "amazon.com", "facebook.com"]
-            urls = [f"https://{d}" for d in top_domains] + [f"http://{d}" for d in top_domains]
+            urls = self._build_benign_urls(top_domains)
             self.data.append(pd.DataFrame(urls, columns=['url']).assign(label=0))
 
     def get_data(self):

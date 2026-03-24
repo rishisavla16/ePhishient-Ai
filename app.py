@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify, render_template
 import joblib
 import os
 from urllib.parse import urlparse
+import pandas as pd
 from train_model import PhishingDetector
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -9,6 +10,7 @@ MODEL_PATH = os.path.join(BASE_DIR, 'phishing_model.pkl')
 TEMPLATE_DIR = os.path.join(BASE_DIR, 'templates')
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
 IS_VERCEL = os.environ.get('VERCEL') == '1'
+TRUSTED_DOMAINS_PATH = os.path.join(BASE_DIR, 'top-1m.csv')
 
 app = Flask(
     __name__,
@@ -25,6 +27,30 @@ try:
     print("Model loaded successfully.")
 except Exception:
     print("Model not found. It will be trained on first request outside serverless.")
+
+
+def registered_domain(hostname):
+    host = (hostname or '').split(':')[0].lower().strip()
+    if host.startswith('www.'):
+        host = host[4:]
+    parts = host.split('.')
+    if len(parts) >= 2:
+        return '.'.join(parts[-2:])
+    return host
+
+
+def load_trusted_domains(limit=50000):
+    if not os.path.exists(TRUSTED_DOMAINS_PATH):
+        return set()
+
+    try:
+        df = pd.read_csv(TRUSTED_DOMAINS_PATH, header=None, names=['rank', 'domain'], nrows=limit)
+        return set(df['domain'].astype(str).str.lower().str.strip())
+    except Exception:
+        return set()
+
+
+TRUSTED_DOMAINS = load_trusted_domains()
 
 
 def normalize_input_url(url):
@@ -87,10 +113,30 @@ def predict():
         prediction = detector.model.predict([features])[0]
         prob = detector.model.predict_proba([features])[0][1]
 
+    feature_map = dict(zip(detector.feature_names, features))
+
+    # Guardrail: avoid false positives on well-known trusted domains unless clear obfuscation exists.
+    domain = registered_domain(urlparse(url).netloc)
+    high_risk_obfuscation = (
+        feature_map.get('is_ip', 0) == 1
+        or feature_map.get('short_url', 0) == 1
+        or feature_map.get('count_at', 0) > 0
+        or feature_map.get('suspicious_tld', 0) == 1
+    )
+
+    if prediction == 1 and domain in TRUSTED_DOMAINS and not high_risk_obfuscation and prob < 0.999:
+        prediction = 0
+        prob = min(prob, 0.20)
+
     confidence = prob if prediction == 1 else (1 - prob)
     
     # 3. Explain
     explanation = detector.explain_prediction(features, prediction, url)
+    if prediction == 0 and domain in TRUSTED_DOMAINS and not high_risk_obfuscation:
+        explanation = [
+            "Domain appears in a trusted top-sites list and has no strong obfuscation indicators.",
+            "URL structure appears legitimate."
+        ]
     
     result = {
         'url': url,
